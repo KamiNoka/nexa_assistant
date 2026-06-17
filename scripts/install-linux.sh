@@ -6,8 +6,9 @@
 #  - создаёт команды терминала: nexa, Nexa, NEXA
 #
 # Использование:
-#   ./scripts/install-linux.sh [путь-к-AppImage]
+#   ./scripts/install-linux.sh [путь-к-AppImage] [--no-voice]
 # Если путь не указан — берётся release/Nexa-*.AppImage или AppImage рядом со скриптом.
+# --no-voice — пропустить настройку Whisper (faster-whisper тянет сотни МБ).
 
 set -euo pipefail
 
@@ -27,6 +28,17 @@ info() { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install] ВНИМАНИЕ:\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[install] ОШИБКА:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Разбор аргументов: --no-voice + опциональный путь к AppImage
+WITH_VOICE=1
+APPIMAGE_ARG=""
+for a in "$@"; do
+	case "$a" in
+		--no-voice) WITH_VOICE=0 ;;
+		-h|--help)  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*)          APPIMAGE_ARG="$a" ;;
+	esac
+done
+
 # 1. Находим AppImage
 find_appimage() {
 	if [ "${1:-}" != "" ]; then
@@ -43,7 +55,7 @@ find_appimage() {
 	die "AppImage не найден. Соберите его: npm run dist:linux — или укажите путь аргументом."
 }
 
-APPIMAGE="$(find_appimage "${1:-}")"
+APPIMAGE="$(find_appimage "$APPIMAGE_ARG")"
 info "AppImage: $APPIMAGE"
 
 # 2. Копируем AppImage
@@ -95,7 +107,22 @@ command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$
 command -v gtk-update-icon-cache >/dev/null 2>&1 && \
 	gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 
-# 7. Проверяем PATH
+# 7. Голос (Whisper) — venv в стабильном пользовательском месте
+if [ "$WITH_VOICE" = "1" ]; then
+	VOICE_SH="$SCRIPT_DIR/setup-voice-linux.sh"
+	if [ -f "$VOICE_SH" ]; then
+		info "Настройка голоса (Whisper). Можно пропустить флагом --no-voice."
+		if ! bash "$VOICE_SH"; then
+			warn "Не удалось настроить голос. Позже выполните: bash scripts/setup-voice-linux.sh"
+		fi
+	else
+		warn "setup-voice-linux.sh не найден — голос не настроен."
+	fi
+else
+	info "Голос пропущен (--no-voice). Настроить позже: bash scripts/setup-voice-linux.sh"
+fi
+
+# 8. Проверяем PATH
 case ":$PATH:" in
 	*":$BIN_DIR:"*) : ;;
 	*)

@@ -180,6 +180,36 @@ async function getInstalledBrowsersWin() {
 // =========================
 const IS_LINUX = process.platform === 'linux'
 
+// Стабильное пользовательское место для venv Whisper (вне read-only AppImage).
+// Сюда же setup:voice / install-linux.sh ставят faster-whisper.
+function linuxWhisperVenvDir() {
+	const dataHome =
+		process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
+	return path.join(dataHome, 'nexa', 'whisper', '.venv')
+}
+
+// Выбор python-интерпретатора для Whisper на Linux:
+// 1) NEXA_PYTHON, 2) пользовательский venv, 3) dev-venv в исходниках, 4) системный python3
+function getLinuxPythonExecutable() {
+	const candidates = [
+		process.env.NEXA_PYTHON,
+		path.join(linuxWhisperVenvDir(), 'bin', 'python'),
+		path.join(
+			electron_1.app.getAppPath(),
+			'resources',
+			'whisper',
+			'.venv',
+			'bin',
+			'python',
+		),
+		path.join(process.cwd(), 'resources', 'whisper', '.venv', 'bin', 'python'),
+	]
+	for (const c of candidates) {
+		if (c && fs.existsSync(c)) return c
+	}
+	return 'python3'
+}
+
 // Кэш наличия бинарников — чтобы не дёргать `which` на каждый вызов
 const _binCache = {}
 async function hasBin(name) {
@@ -1767,27 +1797,36 @@ function getWhisperPath() {
 		}
 	}
 	if (IS_LINUX) {
-		// Ищем .py, исполняемый — python из venv (resources/whisper/.venv), иначе системный python3
+		// whisper_recognition.py ищем в ресурсах (в т.ч. read-only внутри AppImage).
 		const roots = electron_1.app.isPackaged
-			? [path.join(process.resourcesPath, 'resources', 'whisper')]
+			? [
+					path.join(process.resourcesPath, 'resources', 'whisper'),
+					path.join(electron_1.app.getAppPath(), 'resources', 'whisper'),
+				]
 			: [
 					path.join(electron_1.app.getAppPath(), 'resources', 'whisper'),
 					path.join(process.cwd(), 'resources', 'whisper'),
 				]
+		let scriptPath = null
 		for (const root of roots) {
-			const scriptPath = path.join(root, 'whisper_recognition.py')
-			if (fs.existsSync(scriptPath)) {
-				const venvPython = path.join(root, '.venv', 'bin', 'python')
-				const executable = fs.existsSync(venvPython) ? venvPython : 'python3'
-				return { scriptPath, type: 'python', executable }
+			const p = path.join(root, 'whisper_recognition.py')
+			if (fs.existsSync(p)) {
+				scriptPath = p
+				break
 			}
 		}
-		return {
-			scriptPath: null,
-			type: 'python',
-			executable: 'python3',
-			error: `whisper_recognition.py не найден в: ${roots.join(', ')}`,
+		if (!scriptPath) {
+			return {
+				scriptPath: null,
+				type: 'python',
+				executable: 'python3',
+				error: `whisper_recognition.py не найден в: ${roots.join(', ')}`,
+			}
 		}
+		// Интерпретатор: venv нельзя держать внутри read-only AppImage, поэтому
+		// берём его из стабильного пользовательского места (setup:voice кладёт туда же).
+		const executable = getLinuxPythonExecutable()
+		return { scriptPath, type: 'python', executable }
 	}
 	const appPath = electron_1.app.isPackaged
 		? path.join(process.resourcesPath, 'resources', 'whisper', 'whisper_recognition.exe')

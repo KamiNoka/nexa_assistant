@@ -105,7 +105,15 @@ npm run install:linux           # или: bash scripts/install-linux.sh [пут�
 Что делает:
 - копирует AppImage в `~/.local/lib/nexa/`;
 - добавляет ярлык **Nexa** в меню/поиск приложений (с иконкой);
-- создаёт команды терминала: **`nexa`**, **`Nexa`**, **`NEXA`**.
+- создаёт команды терминала: **`nexa`**, **`Nexa`**, **`NEXA`**;
+- настраивает голос (Whisper) — создаёт venv в `~/.local/share/nexa/whisper/.venv`.
+  Пропустить: `npm run install:linux -- --no-voice` (или `bash scripts/install-linux.sh --no-voice`).
+
+> **Важно про голос и AppImage:** venv нельзя держать внутри read-only AppImage,
+> поэтому он живёт в `~/.local/share/nexa/whisper/.venv` (стабильное место,
+> которое читает и установленное приложение). Настроить/обновить отдельно:
+> `bash scripts/setup-voice-linux.sh`. Переопределить интерпретатор можно
+> переменной окружения `NEXA_PYTHON`.
 
 > Поиск приложений в GNOME/KDE регистронезависим — «nexa», «Nexa», «NEXA» найдут
 > ярлык одинаково. В терминале ФС чувствительна к регистру, поэтому три варианта
@@ -148,8 +156,9 @@ resources/
 plugins/                   Плагины/расширения
 services/jarvis/           Внешний access-сервис (опционально)
 scripts/
-  setup-voice.js           Настройка Whisper (venv + faster-whisper)
-  install-linux.sh         Установка ярлыка и команд из AppImage
+  setup-voice.js           Настройка Whisper (на Linux вызывает setup-voice-linux.sh)
+  setup-voice-linux.sh     venv в ~/.local/share/nexa/whisper/.venv + faster-whisper
+  install-linux.sh         Установка ярлыка, команд и голоса из AppImage
   uninstall-linux.sh       Удаление
 build/                     Иконки (icon.ico, icon.png) для electron-builder
 ```
@@ -175,7 +184,9 @@ build/                     Иконки (icon.ico, icon.png) для electron-bui
   и `ELECTRON_BUILDER_BINARIES_MIRROR` (см. выше).
 - **AppImage не запускается из-за sandbox** — запустите с `--no-sandbox`
   (`~/.local/lib/nexa/Nexa.AppImage --no-sandbox`).
-- **Голос не работает** — проверьте `npm run setup:voice` и наличие `ffmpeg` в `PATH`.
+- **Голос не работает / `ModuleNotFoundError: faster_whisper`** — настройте venv:
+  `bash scripts/setup-voice-linux.sh` (создаст `~/.local/share/nexa/whisper/.venv`).
+  Проверьте также наличие `ffmpeg` в `PATH`.
 - **«Функция недоступна» для окон/ввода** — установите `wmctrl` и `xdotool`.
 - **Нет звука/громкости** — нужен `wpctl` (PipeWire) или `pactl` (PulseAudio) в `PATH`.
 

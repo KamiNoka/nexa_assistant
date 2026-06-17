@@ -17,6 +17,7 @@ const WHISPER_DIR = path.join(__dirname, '..', 'resources', 'whisper')
 const VENV_DIR = path.join(WHISPER_DIR, '.venv')
 const REQUIREMENTS = path.join(WHISPER_DIR, 'requirements.txt')
 const IS_WIN = process.platform === 'win32'
+const IS_LINUX = process.platform === 'linux'
 
 function log(msg) {
 	console.log(`[setup:voice] ${msg}`)
@@ -48,6 +49,14 @@ function main() {
 	if (IS_WIN) {
 		log('Windows: используется готовый whisper_recognition.exe, venv не требуется.')
 		log('Если нужен запуск из исходников — установите Python и faster-whisper вручную.')
+		return
+	}
+
+	// На Linux venv ставим в стабильное пользовательское место (его читает и
+	// установленный AppImage). Делегируем автономному bash-скрипту.
+	if (IS_LINUX) {
+		const sh = path.join(__dirname, 'setup-voice-linux.sh')
+		run('bash', [sh, REQUIREMENTS])
 		return
 	}
 
