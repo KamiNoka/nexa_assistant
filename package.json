@@ -11,8 +11,12 @@
 	"scripts": {
 		"build": "npm --prefix vue run build",
 		"start": "electron .",
-		"dist": "npm run build && electron-builder --win",
-		"dist:publish": "npm run build && electron-builder --win --publish always"
+		"start:mac": "ELECTRON_RUN_AS_NODE= electron .",
+		"setup:voice": "node scripts/setup-voice.js",
+		"dist": "electron-builder --win",
+		"dist:linux": "electron-builder --linux",
+		"dist:mac": "electron-builder --mac",
+		"dist:publish": "electron-builder --win --publish always"
 	},
 	"build": {
 		"appId": "com.nexa.app",
@@ -54,6 +58,25 @@
 			],
 			"icon": "build/icon.ico",
 			"artifactName": "${productName}-Setup-${version}.${ext}"
+		},
+		"linux": {
+			"target": [
+				"AppImage",
+				"deb"
+			],
+			"icon": "build/icon.png",
+			"category": "Utility",
+			"maintainer": "KamiNoka",
+			"synopsis": "Nexa voice assistant",
+			"artifactName": "${productName}-${version}.${ext}"
+		},
+		"mac": {
+			"target": [
+				"dmg",
+				"zip"
+			],
+			"icon": "build/icon.png",
+			"category": "public.app-category.productivity"
 		},
 		"nsis": {
 			"oneClick": false,
