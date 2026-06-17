@@ -175,6 +175,305 @@ async function getInstalledBrowsersWin() {
 	}
 }
 
+// =========================
+// Linux helpers: аудио (PipeWire/PulseAudio), окна (wmctrl), ввод (xdotool), запуск (xdg-open/gtk-launch)
+// =========================
+const IS_LINUX = process.platform === 'linux'
+
+// Кэш наличия бинарников — чтобы не дёргать `which` на каждый вызов
+const _binCache = {}
+async function hasBin(name) {
+	if (name in _binCache) return _binCache[name]
+	try {
+		await execFileAsync('which', [name])
+		_binCache[name] = true
+	} catch (_) {
+		_binCache[name] = false
+	}
+	return _binCache[name]
+}
+
+// Определяем доступный аудио-бэкенд один раз (PipeWire wpctl приоритетнее)
+let _audioBackend
+async function getAudioBackend() {
+	if (_audioBackend !== undefined) return _audioBackend
+	if (await hasBin('wpctl')) _audioBackend = 'wpctl'
+	else if (await hasBin('pamixer')) _audioBackend = 'pamixer'
+	else if (await hasBin('pactl')) _audioBackend = 'pactl'
+	else if (await hasBin('amixer')) _audioBackend = 'amixer'
+	else _audioBackend = null
+	return _audioBackend
+}
+const WP_SINK = '@DEFAULT_AUDIO_SINK@'
+
+// Текущая громкость 0..100 (или null, если бэкенд не найден)
+async function linuxGetVolume() {
+	const backend = await getAudioBackend()
+	if (backend === 'wpctl') {
+		const { stdout } = await execFileAsync('wpctl', ['get-volume', WP_SINK])
+		const m = String(stdout).match(/Volume:\s*([0-9.]+)/) // "Volume: 0.55 [MUTED]"
+		return m ? Math.round(parseFloat(m[1]) * 100) : null
+	}
+	if (backend === 'pamixer') {
+		const { stdout } = await execFileAsync('pamixer', ['--get-volume'])
+		const v = parseInt(String(stdout).trim(), 10)
+		return isNaN(v) ? null : v
+	}
+	if (backend === 'pactl') {
+		const { stdout } = await execFileAsync('pactl', [
+			'get-sink-volume',
+			'@DEFAULT_SINK@',
+		])
+		const m = String(stdout).match(/(\d+)%/)
+		return m ? parseInt(m[1], 10) : null
+	}
+	if (backend === 'amixer') {
+		const { stdout } = await execFileAsync('amixer', ['get', 'Master'])
+		const m = String(stdout).match(/\[(\d+)%\]/)
+		return m ? parseInt(m[1], 10) : null
+	}
+	return null
+}
+
+// Установить громкость 0..100
+async function linuxSetVolume(vol) {
+	const v = Math.max(0, Math.min(100, Math.round(Number(vol) || 0)))
+	const backend = await getAudioBackend()
+	if (backend === 'wpctl')
+		await execFileAsync('wpctl', ['set-volume', WP_SINK, `${v / 100}`])
+	else if (backend === 'pamixer')
+		await execFileAsync('pamixer', ['--set-volume', String(v)])
+	else if (backend === 'pactl')
+		await execFileAsync('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${v}%`])
+	else if (backend === 'amixer')
+		await execFileAsync('amixer', ['set', 'Master', `${v}%`])
+	else throw new Error('Не найден аудио-бэкенд (wpctl/pamixer/pactl/amixer)')
+	return v
+}
+
+// Заглушить звук
+async function linuxMute() {
+	const backend = await getAudioBackend()
+	if (backend === 'wpctl') await execFileAsync('wpctl', ['set-mute', WP_SINK, '1'])
+	else if (backend === 'pamixer') await execFileAsync('pamixer', ['--mute'])
+	else if (backend === 'pactl')
+		await execFileAsync('pactl', ['set-sink-mute', '@DEFAULT_SINK@', '1'])
+	else if (backend === 'amixer')
+		await execFileAsync('amixer', ['set', 'Master', 'mute'])
+	else throw new Error('Не найден аудио-бэкенд')
+}
+
+// --- Ввод через xdotool (работает по X11/XWayland) ---
+// Печать текста (аналог macOS keystroke)
+async function linuxType(text) {
+	await execFileAsync('xdotool', ['type', '--', String(text)])
+}
+// Комбинация клавиш в xdotool-нотации: 'ctrl+w', 'F5', 'alt+Left'
+async function linuxKey(combo) {
+	await execFileAsync('xdotool', ['key', '--', combo])
+}
+// Клик: button 1=левая, 3=правая
+async function linuxClick(x, y, button = 1) {
+	await execFileAsync('xdotool', [
+		'mousemove',
+		String(x),
+		String(y),
+		'click',
+		String(button),
+	])
+}
+
+// --- Управление окнами через wmctrl (активация по подстроке заголовка) ---
+async function linuxActivateWindow(title) {
+	try {
+		await execFileAsync('wmctrl', ['-a', String(title)])
+		return true
+	} catch (_) {
+		return false
+	}
+}
+
+// --- Запуск приложений ---
+// Русские имена → бинарь/.desktop в Linux
+const LINUX_APP_ALIASES = {
+	калькулятор: 'gnome-calculator',
+	блокнот: 'gedit',
+	редактор: 'gedit',
+	файлы: 'xdg-open:~',
+	проводник: 'xdg-open:~',
+	терминал: 'x-terminal-emulator',
+	'диспетчер задач': 'gnome-system-monitor',
+	'системный монитор': 'gnome-system-monitor',
+	настройки: 'gnome-control-center',
+	параметры: 'gnome-control-center',
+	хром: 'google-chrome',
+	'гугл хром': 'google-chrome',
+	хромиум: 'chromium',
+	эдж: 'microsoft-edge',
+	опера: 'opera',
+	файрфокс: 'firefox',
+	фаерфокс: 'firefox',
+	мозилла: 'firefox',
+	телеграм: 'telegram-desktop',
+	телеграмм: 'telegram-desktop',
+	дискорд: 'discord',
+	спотифай: 'spotify',
+	стим: 'steam',
+	'вс код': 'code',
+	вскод: 'code',
+	зум: 'zoom',
+	скайп: 'skypeforlinux',
+	слак: 'slack',
+}
+
+// Поиск .desktop-файла по подстроке (имя файла или поле Name=)
+async function linuxFindDesktop(query) {
+	const q = String(query || '')
+		.toLowerCase()
+		.trim()
+	if (!q) return null
+	const dirs = [
+		path.join(os.homedir(), '.local', 'share', 'applications'),
+		'/usr/share/applications',
+		'/usr/local/share/applications',
+		'/var/lib/flatpak/exports/share/applications',
+		path.join(
+			os.homedir(),
+			'.local',
+			'share',
+			'flatpak',
+			'exports',
+			'share',
+			'applications',
+		),
+	]
+	for (const dir of dirs) {
+		let files
+		try {
+			files = fs.readdirSync(dir)
+		} catch (_) {
+			continue
+		}
+		// Сначала по имени файла
+		for (const f of files) {
+			if (f.endsWith('.desktop') && f.toLowerCase().includes(q)) {
+				return f.replace(/\.desktop$/, '')
+			}
+		}
+		// Затем по полю Name=
+		for (const f of files) {
+			if (!f.endsWith('.desktop')) continue
+			try {
+				const content = fs.readFileSync(path.join(dir, f), 'utf8')
+				const nameLine = content.match(/^Name(\[[^\]]+\])?=(.+)$/im)
+				if (nameLine && nameLine[2].toLowerCase().includes(q)) {
+					return f.replace(/\.desktop$/, '')
+				}
+			} catch (_) {
+				/* ignore */
+			}
+		}
+	}
+	return null
+}
+
+async function linuxOpenApp(appName) {
+	const raw = normalizeAppNameFromIpc(appName).trim()
+	if (!raw) return { error: 'Пустое имя приложения' }
+
+	// URL / URI-схемы → xdg-open
+	if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw)) {
+		await execFileAsync('xdg-open', [raw])
+		return { success: true, message: `Открыто: ${raw}` }
+	}
+
+	// Абсолютный/относительный путь или ~/
+	if (raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('~')) {
+		const p = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw
+		if (fs.existsSync(p)) {
+			await execFileAsync('xdg-open', [p])
+			return { success: true, message: `Открыто: ${path.basename(p)}` }
+		}
+	}
+
+	const lower = raw.toLowerCase()
+	let resolved = LINUX_APP_ALIASES[lower] || raw
+
+	// Спец-алиас вида "xdg-open:~" (открыть домашнюю папку)
+	if (resolved.startsWith('xdg-open:')) {
+		const target = resolved
+			.slice('xdg-open:'.length)
+			.replace(/^~/, os.homedir())
+		await execFileAsync('xdg-open', [target])
+		return { success: true, message: `Открыто: ${target}` }
+	}
+
+	// Прямой бинарь в PATH
+	const parts = resolved.split(/\s+/)
+	const bin = parts[0]
+	if (await hasBin(bin)) {
+		const child = spawn(bin, parts.slice(1), {
+			detached: true,
+			stdio: 'ignore',
+		})
+		child.unref()
+		return { success: true, message: `Запущено: ${bin}` }
+	}
+
+	// gtk-launch по имени .desktop напрямую
+	try {
+		await execFileAsync('gtk-launch', [resolved])
+		return { success: true, message: `Запущено: ${resolved}` }
+	} catch (_) {
+		/* ищем .desktop по подстроке */
+	}
+	const desktopId = await linuxFindDesktop(resolved)
+	if (desktopId) {
+		await execFileAsync('gtk-launch', [desktopId])
+		return { success: true, message: `Запущено: ${desktopId}` }
+	}
+
+	// Последний фолбэк — xdg-open (вдруг это файл/URL без схемы)
+	try {
+		await execFileAsync('xdg-open', [resolved])
+		return { success: true, message: `Открыто: ${resolved}` }
+	} catch (e) {
+		return {
+			error: `Не удалось найти приложение «${appName}». Проверьте, что оно установлено, или укажите полный путь.`,
+		}
+	}
+}
+
+async function getInstalledBrowsersLinux() {
+	const known = [
+		{ id: 'firefox', name: 'Firefox', bins: ['firefox', 'firefox-esr'] },
+		{
+			id: 'chrome',
+			name: 'Google Chrome',
+			bins: ['google-chrome', 'google-chrome-stable'],
+		},
+		{ id: 'chromium', name: 'Chromium', bins: ['chromium', 'chromium-browser'] },
+		{
+			id: 'edge',
+			name: 'Microsoft Edge',
+			bins: ['microsoft-edge', 'microsoft-edge-stable'],
+		},
+		{ id: 'opera', name: 'Opera', bins: ['opera'] },
+		{ id: 'brave', name: 'Brave', bins: ['brave', 'brave-browser'] },
+		{ id: 'yandex', name: 'Яндекс.Браузер', bins: ['yandex-browser'] },
+	]
+	const result = []
+	for (const b of known) {
+		for (const bin of b.bins) {
+			if (await hasBin(bin)) {
+				result.push({ id: b.id, name: b.name, command: bin })
+				break
+			}
+		}
+	}
+	return result
+}
+
 // Флаг для определения, выходим ли мы из приложения
 electron_1.app.isQuiting = false
 
@@ -413,21 +712,23 @@ function getIconPath() {
 	const res =
 		process.resourcesPath ||
 		path.join(path.dirname(process.execPath), 'resources')
-	const candidates = electron_1.app.isPackaged
-		? [
-				path.join(res, 'icon.ico'),
-				path.join(__dirname, '..', 'build', 'icon.ico'),
-			]
+	// На Linux трей/окно лучше работают с PNG, поэтому ищем его первым
+	const names = IS_LINUX ? ['icon.png', 'icon.ico'] : ['icon.ico', 'icon.png']
+	const dirs = electron_1.app.isPackaged
+		? [res, path.join(__dirname, '..', 'build')]
 		: [
-				path.join(__dirname, '..', 'build', 'icon.ico'),
-				path.join(electron_1.app.getAppPath(), 'build', 'icon.ico'),
-				path.join(res, 'icon.ico'),
-				path.join(process.cwd(), 'build', 'icon.ico'),
+				path.join(__dirname, '..', 'build'),
+				path.join(electron_1.app.getAppPath(), 'build'),
+				res,
+				path.join(process.cwd(), 'build'),
 			]
-	for (const p of candidates) {
-		if (p && fs.existsSync(p)) return p
+	for (const dir of dirs) {
+		for (const name of names) {
+			const p = path.join(dir, name)
+			if (fs.existsSync(p)) return p
+		}
 	}
-	return path.join(__dirname, '..', 'build', 'icon.ico')
+	return path.join(__dirname, '..', 'build', names[0])
 }
 
 function createWindow() {
@@ -824,6 +1125,10 @@ electron_1.ipcMain.handle('system-get-volume', async () => {
 				volume: isNaN(v) ? 50 : Math.min(100, Math.max(0, v)),
 			}
 		}
+		if (IS_LINUX) {
+			const v = await linuxGetVolume()
+			return { success: true, volume: v == null ? 50 : v }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -880,6 +1185,10 @@ electron_1.ipcMain.handle('system-set-volume', async (event, volume) => {
 			)
 			return { success: true, volume: clampedVolume }
 		}
+		if (IS_LINUX) {
+			const v = await linuxSetVolume(volume)
+			return { success: true, volume: v }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -929,6 +1238,12 @@ electron_1.ipcMain.handle(
 				const newVol = Math.min(100, v + s)
 				await execAsync(`osascript -e 'set volume output volume ${newVol}'`)
 				return { success: true, volume: newVol }
+			}
+			if (IS_LINUX) {
+				const cur = (await linuxGetVolume()) ?? 50
+				const s = Math.max(1, Math.min(100, Math.round(Number(step) || 10)))
+				const v = await linuxSetVolume(Math.min(100, cur + s))
+				return { success: true, volume: v }
 			}
 			if (process.platform !== 'win32') {
 				return { error: 'Только для Windows' }
@@ -995,6 +1310,12 @@ electron_1.ipcMain.handle(
 				await execAsync(`osascript -e 'set volume output volume ${newVol}'`)
 				return { success: true, volume: newVol }
 			}
+			if (IS_LINUX) {
+				const cur = (await linuxGetVolume()) ?? 50
+				const s = Math.max(1, Math.min(100, Math.round(Number(step) || 10)))
+				const v = await linuxSetVolume(Math.max(0, cur - s))
+				return { success: true, volume: v }
+			}
 			if (process.platform !== 'win32') {
 				return { error: 'Только для Windows' }
 			}
@@ -1047,6 +1368,10 @@ electron_1.ipcMain.handle('system-mute-volume', async () => {
 	try {
 		if (process.platform === 'darwin') {
 			await execAsync("osascript -e 'set volume output volume 0'")
+			return { success: true, volume: 0 }
+		}
+		if (IS_LINUX) {
+			await linuxMute()
 			return { success: true, volume: 0 }
 		}
 		if (process.platform !== 'win32') {
@@ -1439,6 +1764,29 @@ function getWhisperPath() {
 			type: 'python',
 			executable: 'python3',
 			error: `whisper_recognition.py не найден. Пути: ${candidates.join(', ')}`,
+		}
+	}
+	if (IS_LINUX) {
+		// Ищем .py, исполняемый — python из venv (resources/whisper/.venv), иначе системный python3
+		const roots = electron_1.app.isPackaged
+			? [path.join(process.resourcesPath, 'resources', 'whisper')]
+			: [
+					path.join(electron_1.app.getAppPath(), 'resources', 'whisper'),
+					path.join(process.cwd(), 'resources', 'whisper'),
+				]
+		for (const root of roots) {
+			const scriptPath = path.join(root, 'whisper_recognition.py')
+			if (fs.existsSync(scriptPath)) {
+				const venvPython = path.join(root, '.venv', 'bin', 'python')
+				const executable = fs.existsSync(venvPython) ? venvPython : 'python3'
+				return { scriptPath, type: 'python', executable }
+			}
+		}
+		return {
+			scriptPath: null,
+			type: 'python',
+			executable: 'python3',
+			error: `whisper_recognition.py не найден в: ${roots.join(', ')}`,
 		}
 	}
 	const appPath = electron_1.app.isPackaged
@@ -2305,6 +2653,9 @@ electron_1.ipcMain.handle('system-open-app', async (event, appName) => {
 			await execAsync(`open -a "${target.replace(/"/g, '\\"')}"`)
 			return { success: true, message: `Приложение "${target}" открыто` }
 		}
+		if (IS_LINUX) {
+			return await linuxOpenApp(appName)
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2323,6 +2674,14 @@ electron_1.ipcMain.handle('system-launch-file', async (event, filePath) => {
 		if (process.platform === 'darwin') {
 			await execAsync(`open "${expanded.replace(/"/g, '\\"')}"`)
 			return { success: true, message: `Открыто` }
+		}
+		if (IS_LINUX) {
+			const target = (filePath || '').startsWith('~')
+				? path.join(os.homedir(), filePath.slice(1))
+				: filePath
+			if (!target) return { error: 'Пустой путь' }
+			await execFileAsync('xdg-open', [target])
+			return { success: true, message: `Открыто: ${path.basename(target)}` }
 		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
@@ -2355,6 +2714,43 @@ electron_1.ipcMain.handle('system-open-folder-smart', async (event, raw) => {
 			const err = await electron_1.shell.openPath(tryPath)
 			if (!err) return { success: true, message: tryPath }
 			return { error: err || `Папка «${rawInput}» не найдена на рабочем столе` }
+		}
+		if (IS_LINUX) {
+			// Абсолютный путь / ~ — открываем напрямую
+			if (rawInput.startsWith('/') || rawInput.startsWith('~')) {
+				const target = rawInput.startsWith('~')
+					? path.join(os.homedir(), rawInput.slice(1))
+					: rawInput
+				if (fs.existsSync(target)) {
+					await execFileAsync('xdg-open', [target])
+					return { success: true, message: `Открыто: ${target}` }
+				}
+				return { error: `Папка «${rawInput}» не найдена` }
+			}
+			// Короткое имя — ищем в стандартных местах
+			const home = os.homedir()
+			const candidates = [
+				path.join(home, 'Desktop', rawInput),
+				path.join(home, 'Рабочий стол', rawInput),
+				path.join(home, 'Documents', rawInput),
+				path.join(home, 'Документы', rawInput),
+				path.join(home, 'Downloads', rawInput),
+				path.join(home, 'Загрузки', rawInput),
+				path.join(home, rawInput),
+			]
+			for (const p of candidates) {
+				try {
+					if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+						await execFileAsync('xdg-open', [p])
+						return { success: true, message: `Открыто: ${p}` }
+					}
+				} catch (_) {
+					/* ignore */
+				}
+			}
+			return {
+				error: `Папка «${rawInput}» не найдена (искали на Рабочем столе, в Документах и Загрузках).`,
+			}
 		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
@@ -2419,6 +2815,16 @@ electron_1.ipcMain.handle('system-exec-powershell', async (event, command) => {
 				message: 'Команда выполнена успешно',
 			}
 		}
+		if (IS_LINUX) {
+			const { stdout, stderr } = await execFileAsync('/bin/bash', ['-c', command], {
+				timeout: 60000,
+			})
+			return {
+				success: true,
+				output: (stdout || stderr || 'Команда выполнена').trim(),
+				message: 'Команда выполнена успешно',
+			}
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2440,7 +2846,9 @@ electron_1.ipcMain.handle('get-installed-browsers', async () => {
 	const list =
 		process.platform === 'darwin'
 			? await getInstalledBrowsersMac()
-			: await getInstalledBrowsersWin()
+			: IS_LINUX
+				? await getInstalledBrowsersLinux()
+				: await getInstalledBrowsersWin()
 	return { success: true, browsers: list }
 })
 electron_1.ipcMain.handle(
@@ -2457,6 +2865,20 @@ electron_1.ipcMain.handle(
 				await runOsascript(
 					'tell application "System Events" to keystroke "f" using {command down, control down}',
 				)
+				return { success: true, message: `Окно "${windowTitle}" развернуто` }
+			}
+			if (IS_LINUX) {
+				await linuxActivateWindow(windowTitle)
+				try {
+					await execFileAsync('wmctrl', [
+						'-r',
+						windowTitle,
+						'-b',
+						'add,maximized_vert,maximized_horz',
+					])
+				} catch (_) {
+					/* ignore */
+				}
 				return { success: true, message: `Окно "${windowTitle}" развернуто` }
 			}
 			if (process.platform !== 'win32') {
@@ -2487,6 +2909,20 @@ electron_1.ipcMain.handle(
 				)
 				return { success: true, message: `Окно "${windowTitle}" свернуто` }
 			}
+			if (IS_LINUX) {
+				try {
+					await execFileAsync('xdotool', [
+						'search',
+						'--name',
+						windowTitle,
+						'windowminimize',
+						'%@',
+					])
+				} catch (_) {
+					/* ignore */
+				}
+				return { success: true, message: `Окно "${windowTitle}" свернуто` }
+			}
 			if (process.platform !== 'win32') {
 				return { error: 'Только для Windows' }
 			}
@@ -2511,6 +2947,14 @@ electron_1.ipcMain.handle('system-close-window', async (event, windowTitle) => {
 			await runOsascript(
 				'tell application "System Events" to keystroke "w" using command down',
 			)
+			return { success: true, message: `Окно "${windowTitle}" закрыто` }
+		}
+		if (IS_LINUX) {
+			try {
+				await execFileAsync('wmctrl', ['-c', windowTitle])
+			} catch (_) {
+				/* ignore */
+			}
 			return { success: true, message: `Окно "${windowTitle}" закрыто` }
 		}
 		if (process.platform !== 'win32') {
@@ -2542,6 +2986,10 @@ electron_1.ipcMain.handle('system-send-keys', async (event, keys) => {
 			await runOsascript(`tell application "System Events" to keystroke "${k}"`)
 			return { success: true, message: `Клавиши отправлены` }
 		}
+		if (IS_LINUX) {
+			await linuxType(keys)
+			return { success: true, message: `Клавиши "${keys}" отправлены` }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2569,6 +3017,13 @@ electron_1.ipcMain.handle(
 					)
 				}
 				return { success: true, message: `Клик на (${x}, ${y})` }
+			}
+			if (IS_LINUX) {
+				await linuxClick(x, y, button.toLowerCase() === 'right' ? 3 : 1)
+				return {
+					success: true,
+					message: `Клик ${button} кнопкой мыши на (${x}, ${y})`,
+				}
 			}
 			if (process.platform !== 'win32') {
 				return { error: 'Только для Windows' }
@@ -2603,6 +3058,20 @@ electron_1.ipcMain.handle(
 				}
 				return { success: true, message: `Клик на (${x}, ${y})` }
 			}
+			if (IS_LINUX) {
+				const btn = button.toLowerCase() === 'right' ? 3 : 1
+				await execFileAsync('xdotool', [
+					'mousemove',
+					String(x),
+					String(y),
+					'mousedown',
+					String(btn),
+				])
+				return {
+					success: true,
+					message: `Зажата ${button} кнопка мыши на (${x}, ${y})`,
+				}
+			}
 			if (process.platform !== 'win32') {
 				return { error: 'Только для Windows' }
 			}
@@ -2623,6 +3092,11 @@ electron_1.ipcMain.handle('system-mouse-up', async (event, button = 'left') => {
 	try {
 		if (process.platform === 'darwin') {
 			return { success: true, message: 'Кнопка мыши отпущена' }
+		}
+		if (IS_LINUX) {
+			const btn = button.toLowerCase() === 'right' ? 3 : 1
+			await execFileAsync('xdotool', ['mouseup', String(btn)])
+			return { success: true, message: `Отпущена ${button} кнопка мыши` }
 		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
@@ -2647,6 +3121,10 @@ electron_1.ipcMain.handle('system-move-mouse', async (event, x, y) => {
 				message: `Курсор перемещён и клик на (${x}, ${y})`,
 			}
 		}
+		if (IS_LINUX) {
+			await execFileAsync('xdotool', ['mousemove', String(x), String(y)])
+			return { success: true, message: `Курсор перемещен на (${x}, ${y})` }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2669,6 +3147,15 @@ electron_1.ipcMain.handle(
 					await runOsascript(
 						`tell application "System Events" to key code ${keyCode}`,
 					)
+				}
+				return { success: true, message: `Прокрутка ${direction}` }
+			}
+			if (IS_LINUX) {
+				const times = Math.min(20, Math.max(1, Math.abs(delta || 1)))
+				const btn = direction.toLowerCase() === 'up' ? '4' : '5'
+				await execFileAsync('xdotool', ['mousemove', String(x), String(y)])
+				for (let i = 0; i < times; i++) {
+					await execFileAsync('xdotool', ['click', btn])
 				}
 				return { success: true, message: `Прокрутка ${direction}` }
 			}
@@ -2701,6 +3188,18 @@ electron_1.ipcMain.handle('system-double-click', async (event, x, y) => {
 			)
 			return { success: true, message: `Двойной клик на (${x}, ${y})` }
 		}
+		if (IS_LINUX) {
+			await execFileAsync('xdotool', [
+				'mousemove',
+				String(x),
+				String(y),
+				'click',
+				'--repeat',
+				'2',
+				'1',
+			])
+			return { success: true, message: `Двойной клик на (${x}, ${y})` }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2714,7 +3213,7 @@ electron_1.ipcMain.handle('system-double-click', async (event, x, y) => {
 })
 electron_1.ipcMain.handle('system-get-screen-size', async () => {
 	try {
-		if (process.platform === 'darwin') {
+		if (process.platform === 'darwin' || IS_LINUX) {
 			const primary = electron_1.screen.getPrimaryDisplay()
 			const bounds = primary.size || primary.bounds
 			return { success: true, width: bounds.width, height: bounds.height }
@@ -2749,6 +3248,23 @@ electron_1.ipcMain.handle('browser-open-url', async (event, url, browser) => {
 		if (process.platform === 'darwin') {
 			return await openExternalUrl(url)
 		}
+		if (IS_LINUX) {
+			// Если указан конкретный браузер и он есть — запускаем его с URL
+			if (browser) {
+				const found = (await getInstalledBrowsersLinux()).find(
+					b => b.id === browser.toLowerCase(),
+				)
+				if (found) {
+					const child = spawn(found.command, [url], {
+						detached: true,
+						stdio: 'ignore',
+					})
+					child.unref()
+					return { success: true, message: `URL "${url}" открыт в ${found.name}` }
+				}
+			}
+			return await openExternalUrl(url)
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2779,7 +3295,7 @@ electron_1.ipcMain.handle('browser-open-url', async (event, url, browser) => {
 })
 electron_1.ipcMain.handle('browser-search', async (event, query, browser) => {
 	try {
-		if (process.platform === 'darwin') {
+		if (process.platform === 'darwin' || IS_LINUX) {
 			const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`
 			return await openExternalUrl(searchUrl)
 		}
@@ -2816,7 +3332,7 @@ electron_1.ipcMain.handle('browser-search', async (event, query, browser) => {
 })
 electron_1.ipcMain.handle('browser-new-tab', async (event, url, browser) => {
 	try {
-		if (process.platform === 'darwin') {
+		if (process.platform === 'darwin' || IS_LINUX) {
 			const targetUrl = url || 'https://'
 			return await openExternalUrl(targetUrl)
 		}
@@ -2857,6 +3373,10 @@ electron_1.ipcMain.handle('browser-close-tab', async (event, browser) => {
 			)
 			return { success: true, message: 'Вкладка закрыта' }
 		}
+		if (IS_LINUX) {
+			await linuxKey('ctrl+w')
+			return { success: true, message: 'Вкладка закрыта' }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2877,6 +3397,10 @@ electron_1.ipcMain.handle('browser-refresh', async (event, browser) => {
 			await runOsascript(
 				'tell application "System Events" to keystroke "r" using command down',
 			)
+			return { success: true, message: 'Страница обновлена' }
+		}
+		if (IS_LINUX) {
+			await linuxKey('F5')
 			return { success: true, message: 'Страница обновлена' }
 		}
 		if (process.platform !== 'win32') {
@@ -2901,6 +3425,10 @@ electron_1.ipcMain.handle('browser-go-back', async (event, browser) => {
 			)
 			return { success: true, message: 'Навигация назад' }
 		}
+		if (IS_LINUX) {
+			await linuxKey('alt+Left')
+			return { success: true, message: 'Навигация назад' }
+		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
 		}
@@ -2921,6 +3449,10 @@ electron_1.ipcMain.handle('browser-go-forward', async (event, browser) => {
 			await runOsascript(
 				'tell application "System Events" to keystroke "]" using command down',
 			)
+			return { success: true, message: 'Навигация вперед' }
+		}
+		if (IS_LINUX) {
+			await linuxKey('alt+Right')
 			return { success: true, message: 'Навигация вперед' }
 		}
 		if (process.platform !== 'win32') {
@@ -2951,6 +3483,29 @@ electron_1.ipcMain.handle('browser-get-url', async (event, browser) => {
 			const { stdout } = await execAsync("osascript -e 'the clipboard'")
 			const url = (stdout || '').trim()
 			return { success: true, url: url || 'URL скопирован в буфер обмена' }
+		}
+		if (IS_LINUX) {
+			await linuxKey('ctrl+l')
+			await new Promise(r => setTimeout(r, 120))
+			await linuxKey('ctrl+c')
+			await new Promise(r => setTimeout(r, 80))
+			// Пробуем прочитать буфер обмена (Wayland: wl-paste, X11: xclip/xsel)
+			for (const [bin, args] of [
+				['wl-paste', ['-n']],
+				['xclip', ['-selection', 'clipboard', '-o']],
+				['xsel', ['-b']],
+			]) {
+				if (await hasBin(bin)) {
+					try {
+						const { stdout } = await execFileAsync(bin, args)
+						const url = (stdout || '').trim()
+						if (url) return { success: true, url }
+					} catch (_) {
+						/* ignore */
+					}
+				}
+			}
+			return { success: true, url: 'URL скопирован в буфер обмена' }
 		}
 		if (process.platform !== 'win32') {
 			return { error: 'Только для Windows' }
