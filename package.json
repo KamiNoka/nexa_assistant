@@ -5,7 +5,7 @@
 	"author": "Nexa",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/whydarcy/nexa_assistant.git"
+		"url": "https://github.com/KamiNoka/nexa_assistant.git"
 	},
 	"main": "dist/main.js",
 	"scripts": {
@@ -13,6 +13,8 @@
 		"start": "electron .",
 		"start:mac": "ELECTRON_RUN_AS_NODE= electron .",
 		"setup:voice": "node scripts/setup-voice.js",
+		"install:linux": "bash scripts/install-linux.sh",
+		"uninstall:linux": "bash scripts/uninstall-linux.sh",
 		"dist": "electron-builder --win",
 		"dist:linux": "electron-builder --linux",
 		"dist:mac": "electron-builder --mac",
@@ -35,14 +37,18 @@
 				"from": "resources",
 				"to": "resources",
 				"filter": [
-					"**/*"
+					"**/*",
+					"!whisper/.venv/**",
+					"!whisper/.venv",
+					"!whisper/build/**",
+					"!**/__pycache__/**"
 				]
 			}
 		],
 		"publish": [
 			{
 				"provider": "github",
-				"owner": "whydarcy",
+				"owner": "KamiNoka",
 				"repo": "nexa_assistant",
 				"releaseType": "release"
 			}
@@ -68,7 +74,16 @@
 			"category": "Utility",
 			"maintainer": "KamiNoka",
 			"synopsis": "Nexa voice assistant",
-			"artifactName": "${productName}-${version}.${ext}"
+			"executableName": "nexa",
+			"artifactName": "${productName}-${version}.${ext}",
+			"desktop": {
+				"Name": "Nexa",
+				"GenericName": "Voice Assistant",
+				"Comment": "Локальный голосовой AI-ассистент",
+				"Categories": "Utility;",
+				"Keywords": "nexa;voice;assistant;ассистент;голос;",
+				"StartupWMClass": "Nexa"
+			}
 		},
 		"mac": {
 			"target": [

@@ -1,50 +1,186 @@
-# Nexa
+# Nexa (Linux-форк)
 
-Локальный AI-ассистент на Electron и Vue с голосовым вводом, чатом, командами, Telegram MTProto и автообновлением через GitHub Releases.
+Локальный голосовой AI-ассистент на **Electron + Vue**: чат, команды, управление
+системой (громкость, запуск приложений, окна, мышь/клавиатура), браузер и
+Telegram (MTProto). Распознавание речи — локально через **Whisper**
+(`faster-whisper`).
 
-## Установка
+Это форк [`whydarcy/nexa_assistant`](https://github.com/whydarcy/nexa_assistant)
+с **портом под Linux**: оригинал поддерживал только Windows и macOS, здесь
+добавлена полная поддержка Linux и сборка **AppImage / deb**.
+
+---
+
+## Поддержка платформ
+
+| Платформа | Состояние | Реализация системных фун��ций |
+|-----------|-----------|------------------------------|
+| **Linux** | Порт (этот форк) | `pactl`/`wpctl`/`pamixer`/`amixer`, `wmctrl`, `xdotool`, `xdg-open`/`gtk-launch` |
+| Windows   | Оригинал | PowerShell |
+| macOS     | Оригинал | `osascript` |
+
+Вся нативная логика — в одном файле `dist/main.js` (готовый скомпилированный JS;
+исходников `src/`/`vue/` в репозитории нет, UI лежит собранным в `renderer/`).
+
+---
+
+## Требования (Linux)
+
+| Компонент | Назначение |
+|-----------|-----------|
+| **Node.js 18+**, **npm 9+** | запуск и сборка |
+| **Python 3.9+** + `venv` | голос (Whisper) |
+| **ffmpeg** | конвертация записи с микрофона |
+| **wmctrl**, **xdotool** | управление окнами и ввод (X11/XWayland) |
+| PipeWire (`wpctl`) или PulseAudio (`pactl`) | громкость |
+
+Установка зависимостей ОС:
 
 ```bash
-npm install
-cmd /c npm install --prefix vue
+# Arch
+sudo pacman -S nodejs npm python python-pip ffmpeg wmctrl xdotool
+
+# Debian/Ubuntu
+sudo apt install -y nodejs npm python3 python3-venv python3-pip ffmpeg wmctrl xdotool
+
+# Fedora
+sudo dnf install -y nodejs npm python3 python3-pip ffmpeg wmctrl xdotool
 ```
 
-## Запуск
+---
+
+## Запуск из исходников
 
 ```bash
+git clone https://github.com/KamiNoka/nexa_assistant.git
+cd nexa_assistant
+npm install
 npm start
 ```
 
-## Сборка
+> **Если `npm install` падает на загрузке Electron** (таймаут к GitHub) —
+> используйте зеркало:
+> ```bash
+> ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" npm install
+> ```
+
+### Голос (один раз)
 
 ```bash
-npm run build
-npm run dist
+npm run setup:voice
 ```
 
-Для публикации обновления в GitHub Releases:
+Создаёт `resources/whisper/.venv` и ставит `faster-whisper`. Модель скачивается
+автоматически при первом распознавании.
+
+---
+
+## Сборка AppImage / deb
 
 ```bash
-npm run dist:publish
+npm run dist:linux
 ```
 
-Для публикации нужен `GH_TOKEN` с правами на создание релизов в репозитории `whydarcy/nexa_assistant`.
+Готовые `Nexa-<версия>.AppImage` и `Nexa-<версия>.deb` появятся в `release/`.
 
-## Структура
+> При проблемах с сетью к GitHub добавьте зеркала:
+> ```bash
+> ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" \
+> ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/" \
+> npm run dist:linux
+> ```
+
+---
+
+## Установка ярлыка (AppImage)
+
+AppImage — самодостаточный файл, но сам по себе не добавляет ярлык. Скрипт-установщик
+кладёт его в систему пользователя (без root), добавляет в меню приложений и создаёт
+команды терминала:
+
+```bash
+npm run install:linux           # или: bash scripts/install-linux.sh [путь-к-AppImage]
+```
+
+Что делает:
+- копирует AppImage в `~/.local/lib/nexa/`;
+- добавляет ярлык **Nexa** в меню/поиск приложений (с иконкой);
+- создаёт команды терминала: **`nexa`**, **`Nexa`**, **`NEXA`**.
+
+> Поиск приложений в GNOME/KDE регистронезависим — «nexa», «Nexa», «NEXA» найдут
+> ярлык одинаково. В терминале ФС чувствительна к регистру, поэтому три варианта
+> написания заведены отдельными командами.
+
+Если `~/.local/bin` не в `PATH`, скрипт подскажет, что добавить в `~/.zshrc`/`~/.bashrc`.
+
+Удаление:
+
+```bash
+npm run uninstall:linux
+```
+
+Через **deb** ярлык и команда `nexa` создаются автоматически при установке пакета.
+
+---
+
+## Возможности
+
+- 🎙️ **Голос** — push-to-talk, локальный Whisper, конвертация через ffmpeg.
+- 💬 **Чат и команды** — текстовый интерфейс и выполнение сценариев из UI.
+- 🖥️ **Система** — громкость, запуск приложений по имени, управление окнами, мышь/клавиатура.
+- 🌐 **Браузер** — открытие URL, поиск, навигация.
+- ✈️ **Telegram** — вход по коду, отправка/чтение сообщений (MTProto).
+- 🔄 **Обновления** — через GitHub Releases (`electron-updater`).
+
+---
+
+## Структура проекта
 
 ```text
-dist/                 Electron main/preload и IPC-мосты
-renderer/             Собранный Vue renderer для Electron
-vue/                  Исходники Vue-интерфейса
-plugins/              Внешние плагины и расширения
-resources/whisper/    Whisper-скрипт, requirements и PyInstaller spec
-resources/vosk/       Vosk/WebAudio runtime-файлы и локальные speech-модели
-services/jarvis/      Внешний Jarvis access service
-build/                Иконки и ресурсы electron-builder
+dist/
+  main.js                  Electron main-процесс + все IPC-обработчики (вкл. Linux-ветки)
+  preload.js               preload-мост
+  telegram-user-bridge.cjs Telegram MTProto (GramJS)
+renderer/                  Собранный Vue UI (index.html + assets)
+resources/
+  whisper/                 whisper_recognition.py, requirements.txt, .venv (после setup:voice)
+  vosk/                    Резервные speech-файлы и модели
+plugins/                   Плагины/расширения
+services/jarvis/           Внешний access-сервис (опционально)
+scripts/
+  setup-voice.js           Настройка Whisper (venv + faster-whisper)
+  install-linux.sh         Установка ярлыка и команд из AppImage
+  uninstall-linux.sh       Удаление
+build/                     Иконки (icon.ico, icon.png) для electron-builder
 ```
 
-## Требования
+---
 
-- Node.js 18+
-- Python 3.x для Whisper
-- Windows 10/11 x64
+## npm-скрипты
+
+| Скрипт | Действие |
+|--------|----------|
+| `npm start` | Запуск Electron из исходников |
+| `npm run setup:voice` | Настройка Whisper (venv + faster-whisper) |
+| `npm run dist:linux` | Сборка AppImage и deb |
+| `npm run install:linux` | Установка ярлыка/команд из AppImage |
+| `npm run uninstall:linux` | Удаление установленного ярлыка |
+| `npm run dist` / `dist:mac` | Сборка под Windows / macOS |
+
+---
+
+## Решение проблем
+
+- **`npm install` или сборка виснет на загрузке Electron** — задайте `ELECTRON_MIRROR`
+  и `ELECTRON_BUILDER_BINARIES_MIRROR` (см. выше).
+- **AppImage не запускается из-за sandbox** — запустите с `--no-sandbox`
+  (`~/.local/lib/nexa/Nexa.AppImage --no-sandbox`).
+- **Голос не работает** — проверьте `npm run setup:voice` и наличие `ffmpeg` в `PATH`.
+- **«Функция недоступна» для окон/ввода** — установите `wmctrl` и `xdotool`.
+- **Нет звука/громкости** — нужен `wpctl` (PipeWire) или `pactl` (PulseAudio) в `PATH`.
+
+---
+
+## Лицензия
+
+См. [LICENSE.txt](LICENSE.txt).
